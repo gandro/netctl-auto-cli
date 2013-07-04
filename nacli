@@ -1,0 +1,196 @@
+#! /bin/bash
+
+. /usr/lib/network/globals
+. /usr/lib/network/wpa
+
+NACLI_VERSION=0.1
+
+usage() {
+    cat << END
+Usage: nacli {COMMAND} [PROFILE]
+             [--help|--version]
+
+Commands:
+  list                 List available profiles
+  current              List currently active profiles
+  reconnect            Reconnect all interfaces
+  disconnect           Disconnect all interfaces
+  enable-all           Enable all profiles for automatic connection
+  disable-all          Disable all profiles for automatic connection
+  enable [PROFILE]     Enable a single profile for automatic connection
+  disable [PROFILE]    Disable a single profile for automatic connection
+  switch-to [PROFILE]  Switch to a profile, disable all others
+END
+}
+
+get_interfaces() {
+    systemctl --full --type=service list-units | \
+        grep -o "^netctl-auto@[[:alnum:]:._-]\+.service" | \
+        cut -d'@' -f2 | cut -d'.' -f1
+}
+
+# Removes quotes in string $1 returned from wpa_cli status
+wpa_unquote() {
+    local str="$1"
+    if [[ ${str:0:1} == '"' ]]; then
+        printf "%s\n" "${str:1:-1}"
+    else
+        while [[ -n "$str" ]]; do
+            printf "\x"${str:0:2}
+            str=${str:2}
+        done
+        printf "\n"
+    fi
+}
+
+# Output format: $active $id $interface $profile
+wpa_list_profiles() {
+    local interface
+    for interface in $(get_interfaces); do
+        local id ssid bssid flags
+        while IFS=$'\t' read -r id ssid bssid flags; do
+            local active="0"
+            if [[ "$flags" =~ \[CURRENT\] ]]; then
+                active="1"
+            fi
+
+            local profile=$(wpa_call $interface get_network $id id_str)
+            profile=$(wpa_unquote "$profile")
+
+            printf '%s %s %s %s\n' $active $id $interface "$profile"
+        done < <(wpa_call $interface list_networks | tail -n+2)
+    done
+}
+
+# Returns wpa_supplicant network id and interface from profile $1
+wpa_get_network_id() {
+    local active id interface profile
+    while read -r active id interface profile; do
+        if [[ "$1" == "$profile" ]] ; then
+            echo $id $interface
+            return 0
+        fi
+    done < <(wpa_list_profiles)
+    return 1
+}
+
+# Prints error message and exits in case state $1 was not reached for iface $2
+wpa_state_exit_error() {
+    if [[ "$1" == "COMPLETED" ]]; then
+        report_error "WPA association/authentication failed for interface '$2'"
+
+    else
+        report_error "Timed out waiting for correct WPA state on interface '$2'"
+    fi
+    report_debug "WPA state for interface '$2': $(wpa_get_state "$2")"
+    exit 1
+}
+
+# Runs wpa_supplicant action $1 for profile network $2
+wpa_profile_action() {
+    local action=$1 profile=$2
+    local id interface timeout state cmd
+
+    if ! read -r id interface < <(wpa_get_network_id "$profile"); then
+        exit_error "Profile '$profile' does not exist or is not available"
+    fi
+
+    timeout=$(source "$PROFILE_DIR/$profile" ; echo $TimeoutWPA)
+    : ${timeout:=15}
+
+    case $action in
+      enable)
+        cmd="enable_network"
+        state="COMPLETED";;
+      disable)
+        cmd="disable_network"
+        state="DISCONNECTED";;
+      switch-to)
+        cmd="select_network"
+        state="COMPLETED";;
+      *)
+        return 1;
+    esac
+
+    wpa_call $interface $cmd $id >/dev/null
+    if ! wpa_wait_until_state $timeout $interface "$state" ; then
+        wpa_state_exit_error $state $interface
+    fi
+}
+
+# Runs wpa_supplicant action $1 for all interfaces
+wpa_action() {
+    local action=$1
+    local cmd state timeout=5 interface
+
+    case $action in
+      enable-all)
+        cmd="enable_network all";;
+      disable-all)
+        cmd="disable_network all";;
+      reconnect)
+        cmd="reassociate"
+        state="COMPLETED";;
+      disconnect)
+        cmd="disconnect"
+        state="DISCONNECTED";;
+      *)
+        return 1;;
+    esac
+
+    for interface in $(get_interfaces); do
+        wpa_call $interface $cmd >/dev/null
+        if [ -n "$state" ]; then
+            if ! wpa_wait_until_state $timeout $interface $state ; then
+                wpa_state_exit_error $state $interface
+            fi
+        fi
+    done
+}
+
+# Lists currently active profiles
+current() {
+    local interface
+    for interface in $(get_interfaces); do
+        local state=$(wpa_get_state $interface)
+        if [[ "$state" == "COMPLETED" ]]; then
+            wpa_call $interface status | grep '^id_str=' | cut -d'=' -f2-
+        else
+            printf "%s: %s\n" $interface $state >&2
+        fi
+    done
+}
+
+# Lists all available profiles
+list() {
+    local indicators=( ' ' '*' )
+    local active id interface profile
+    while read -r active id interface profile; do
+        printf "%s %s\n" "${indicators[$active]}" "$profile"
+    done < <(wpa_list_profiles)
+}
+
+case $# in
+  1)
+    case $1 in
+      --version)
+        report_notice "nacli version $NACLI_VERSION";;
+      --help)
+        usage;;
+      list|current)
+        "$1";;
+      enable-all|disable-all|disconnect|reconnect)
+        wpa_action "$1";;
+      *)
+        exit_error "$(usage)";;
+    esac;;
+  2)
+    case $1 in
+      enable|disable|switch-to)
+        wpa_profile_action "$1" "$2";;
+      *)
+        exit_error "$(usage)";;
+    esac;;
+  *)
+    exit_error "$(usage)";;
+esac
