@@ -1,9 +1,9 @@
 #! /bin/bash
 
 . /usr/lib/network/globals
-. /usr/lib/network/wpa
+. "$SUBR_DIR/wpa"
 
-NACLI_VERSION=0.1
+NACLI_VERSION=0.2
 
 usage() {
     cat << END
@@ -11,19 +11,18 @@ Usage: nacli {COMMAND} [PROFILE]
              [--help|--version]
 
 Commands:
-  list                 List available profiles
+  list                 List available profiles (active='*', disabled='!')
   current              List currently active profiles
-  reconnect            Reconnect all interfaces
-  disconnect           Disconnect all interfaces
-  enable-all           Enable all profiles for automatic connection
-  disable-all          Disable all profiles for automatic connection
+  switch-to [PROFILE]  Switch to a profile, enable it if necessary
   enable [PROFILE]     Enable a single profile for automatic connection
   disable [PROFILE]    Disable a single profile for automatic connection
-  switch-to [PROFILE]  Switch to a profile, disable all others
+  enable-all           Enable all profiles for automatic connection
+  disable-all          Disable all profiles for automatic connection
 END
 }
 
-get_interfaces() {
+# Gets a list of interfaces for which netctl-auto is active
+netctl_auto_interfaces() {
     systemctl --full --type=service list-units | \
         grep -o "^netctl-auto@[[:alnum:]:._-]\+.service" | \
         cut -d'@' -f2 | cut -d'.' -f1
@@ -43,130 +42,125 @@ wpa_unquote() {
     fi
 }
 
-# Output format: $active $id $interface $profile
+# List of profiles. Output format: $interface $id $flag $profile
 wpa_list_profiles() {
     local interface
-    for interface in $(get_interfaces); do
+    for interface in $(netctl_auto_interfaces); do
         local id ssid bssid flags
         while IFS=$'\t' read -r id ssid bssid flags; do
-            local active="0"
+            local flag="e"
             if [[ "$flags" =~ \[CURRENT\] ]]; then
-                active="1"
+                flag="a"
+            elif [[ "$flags" =~ \[DISABLED\] ]]; then
+                flag="d"
             fi
 
             local profile=$(wpa_call $interface get_network $id id_str)
             profile=$(wpa_unquote "$profile")
 
-            printf '%s %s %s %s\n' $active $id $interface "$profile"
+            echo $interface $id $flag "$profile"
         done < <(wpa_call $interface list_networks | tail -n+2)
     done
 }
 
 # Returns wpa_supplicant network id and interface from profile $1
 wpa_get_network_id() {
-    local active id interface profile
-    while read -r active id interface profile; do
+    local interface id flag profile
+    while read -r interface id flag profile; do
         if [[ "$1" == "$profile" ]] ; then
             echo $id $interface
             return 0
         fi
     done < <(wpa_list_profiles)
+
+    report_error "Profile '$1' does not exist or is not available" >&2
     return 1
 }
 
-# Prints error message and exits in case state $1 was not reached for iface $2
-wpa_state_exit_error() {
-    if [[ "$1" == "COMPLETED" ]]; then
-        report_error "WPA association/authentication failed for interface '$2'"
-
-    else
-        report_error "Timed out waiting for correct WPA state on interface '$2'"
-    fi
-    report_debug "WPA state for interface '$2': $(wpa_get_state "$2")"
-    exit 1
-}
-
-# Runs wpa_supplicant action $1 for profile network $2
+# Runs the specified action $1 with optional network id for profile $2
 wpa_profile_action() {
     local action=$1 profile=$2
-    local id interface timeout state cmd
+    local id interfaces interface wpa_cmd
 
-    if ! read -r id interface < <(wpa_get_network_id "$profile"); then
-        exit_error "Profile '$profile' does not exist or is not available"
+    if [ -n "$profile" ] ; then
+        { read -r id interfaces; } < <(wpa_get_network_id $profile) || exit 1
+    else
+        interfaces=$(netctl_auto_interfaces)
     fi
-
-    timeout=$(source "$PROFILE_DIR/$profile" ; echo $TimeoutWPA)
-    : ${timeout:=15}
 
     case $action in
       enable)
-        cmd="enable_network"
-        state="COMPLETED";;
+        wpa_cmd=(enable_network $id);;
       disable)
-        cmd="disable_network"
-        state="DISCONNECTED";;
-      switch-to)
-        cmd="select_network"
-        state="COMPLETED";;
+        wpa_cmd=(disable_network $id);;
+      enable-all)
+        wpa_cmd=(enable_network all);;
+      disable-all)
+        wpa_cmd=(disable_network all);;
       *)
         return 1;
     esac
 
-    wpa_call $interface $cmd $id >/dev/null
-    if ! wpa_wait_until_state $timeout $interface "$state" ; then
-        wpa_state_exit_error $state $interface
-    fi
-}
-
-# Runs wpa_supplicant action $1 for all interfaces
-wpa_action() {
-    local action=$1
-    local cmd state timeout=5 interface
-
-    case $action in
-      enable-all)
-        cmd="enable_network all";;
-      disable-all)
-        cmd="disable_network all";;
-      reconnect)
-        cmd="reassociate"
-        state="COMPLETED";;
-      disconnect)
-        cmd="disconnect"
-        state="DISCONNECTED";;
-      *)
-        return 1;;
-    esac
-
-    for interface in $(get_interfaces); do
-        wpa_call $interface $cmd >/dev/null
-        if [ -n "$state" ]; then
-            if ! wpa_wait_until_state $timeout $interface $state ; then
-                wpa_state_exit_error $state $interface
-            fi
+    for interface in $interfaces; do
+        wpa_call $interface ${wpa_cmd[@]} >/dev/null
+        if [[ "${wpa_cmd[0]}" == "enable_network" ]] ; then
+            wpa_call $interface reassociate >/dev/null
         fi
     done
+}
+
+# Switches to profile $1, preserves list of enabled networks
+switch_to() {
+    local profile=$1
+    local id interface timeout enabled_networks
+
+    # Load profile interface, WPA network id and timeout
+    { read -r id interface; } < <(wpa_get_network_id $profile) || exit 1
+    timeout=$(source "$PROFILE_DIR/$profile" ; echo $TimeoutWPA)
+    : ${timeout:=25}
+
+    # List of enabled networks
+    enabled_networks=( $(wpa_call $interface list_networks | tail -n+2 | \
+                        cut -f 1,4 | fgrep -v '[DISABLED]' | cut -f 1) )
+
+    reenable_networks() {
+        for network in ${enabled_networks[@]}; do
+            wpa_call $interface enable_network $network >/dev/null
+        done
+
+        if [[ $(wpa_get_state $interface) != "COMPLETED" ]] ; then
+            if ! in_array $id ${enabled_networks[@]} ; then
+                wpa_call $interface disable_network $id >/dev/null
+            fi
+        fi
+    }
+
+    trap "{ reenable_networks; exit 1; }" SIGINT SIGTERM
+
+    wpa_call $interface select_network $id >/dev/null
+    if ! wpa_wait_until_state $timeout $interface "COMPLETED" ; then
+        report_error "WPA association/authentication failed for interface '$interface'"
+    fi
+
+    reenable_networks
 }
 
 # Lists currently active profiles
 current() {
     local interface
-    for interface in $(get_interfaces); do
+    for interface in $(netctl_auto_interfaces); do
         local state=$(wpa_get_state $interface)
         if [[ "$state" == "COMPLETED" ]]; then
             wpa_call $interface status | grep '^id_str=' | cut -d'=' -f2-
-        else
-            printf "%s: %s\n" $interface $state >&2
         fi
     done
 }
 
 # Lists all available profiles
 list() {
-    local indicators=( ' ' '*' )
-    local active id interface profile
-    while read -r active id interface profile; do
-        printf "%s %s\n" "${indicators[$active]}" "$profile"
+    local interface id flag profile
+    while read -r interface id flag profile; do
+        printf "%s %s\n" "$(echo $flag | tr 'aed' '* !')" "$profile"
     done < <(wpa_list_profiles)
 }
 
@@ -179,15 +173,17 @@ case $# in
         usage;;
       list|current)
         "$1";;
-      enable-all|disable-all|disconnect|reconnect)
-        wpa_action "$1";;
+      enable-all|disable-all)
+        wpa_profile_action "$1";;
       *)
         exit_error "$(usage)";;
     esac;;
   2)
     case $1 in
-      enable|disable|switch-to)
+      enable|disable)
         wpa_profile_action "$1" "$2";;
+      switch-to)
+        switch_to "$2";;
       *)
         exit_error "$(usage)";;
     esac;;
