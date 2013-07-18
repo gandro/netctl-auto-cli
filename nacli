@@ -83,7 +83,7 @@ wpa_profile_action() {
     local id interfaces interface wpa_cmd
 
     if [ -n "$profile" ] ; then
-        { read -r id interfaces; } < <(wpa_get_network_id "$profile") || exit 1
+        read -r id interfaces < <(wpa_get_network_id "$profile") || return 1
     else
         interfaces=$(netctl_auto_interfaces)
     fi
@@ -115,31 +115,31 @@ switch_to() {
     local id interface timeout enabled_networks
 
     # Load profile interface, WPA network id and timeout
-    { read -r id interface; } < <(wpa_get_network_id "$profile") || exit 1
-    timeout=$(source "$PROFILE_DIR/$profile" ; echo $TimeoutWPA)
-    : ${timeout:=25}
+    read -r id interface < <(wpa_get_network_id "$profile") || return 1
+    timeout=$(. "$PROFILE_DIR/$profile" >/dev/null ; echo ${TimeoutWPA:=15})
 
     # List of enabled networks
-    enabled_networks=( $(wpa_call $interface list_networks | tail -n+2 | \
-                        cut -f 1,4 | fgrep -v '[DISABLED]' | cut -f 1) )
+    enabled_networks=$(wpa_call $interface list_networks | tail -n+2 | \
+        cut -f 1,4 | fgrep -v '[DISABLED]' | cut -f 1 | tr "\n" ' ')
 
     reenable_networks() {
-        for network in ${enabled_networks[@]}; do
+        for network in $enabled_networks; do
             wpa_call $interface enable_network $network >/dev/null
         done
 
         if [[ $(wpa_get_state $interface) != "COMPLETED" ]] ; then
-            if ! in_array $id ${enabled_networks[@]} ; then
+            if ! in_array $id $enabled_networks ; then
                 wpa_call $interface disable_network $id >/dev/null
             fi
         fi
     }
 
-    trap "{ reenable_networks; exit 1; }" SIGINT SIGTERM
+    trap "reenable_networks; exit 1" SIGINT SIGTERM
 
     wpa_call $interface select_network $id >/dev/null
     if ! wpa_wait_until_state $timeout $interface "COMPLETED" ; then
-        report_error "WPA association/authentication failed for interface '$interface'"
+        report_error "WPA association/authentication failed" \
+                                            "for interface '$interface'"
     fi
 
     reenable_networks
@@ -160,7 +160,7 @@ current() {
 list() {
     local interface id flag profile
     while read -r interface id flag profile; do
-        printf "%s %s\n" "$(echo $flag | tr 'aed' '* !')" "$profile"
+        echo "$(echo $flag | tr 'aed' '* !')" "$profile"
     done < <(wpa_list_profiles)
 }
 
