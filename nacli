@@ -3,7 +3,7 @@
 . /usr/lib/network/globals
 . "$SUBR_DIR/wpa"
 
-NACLI_VERSION=0.2
+NACLI_VERSION=0.2.1
 
 usage() {
     cat << END
