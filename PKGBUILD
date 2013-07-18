@@ -1,6 +1,6 @@
 # Maintainer: gandro <gandro@gmx.net>
 pkgname=netctl-auto-cli
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc="Command line interface for the netctl-auto service."
 url="https://github.com/gandro/netctl-auto-cli"
@@ -12,7 +12,7 @@ conflicts=()
 replaces=()
 backup=()
 source=("http://github.com/gandro/${pkgname}/archive/v${pkgver}.tar.gz")
-md5sums=('128f5dad25274082f3eff6bf7ca43045')
+md5sums=('aa63ecaac59882ea4f4ad16702e71763')
 
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
