@@ -79,11 +79,11 @@ wpa_get_network_id() {
 
 # Runs the specified action $1 with optional network id for profile $2
 wpa_profile_action() {
-    local action=$1 profile=$2
+    local action=$1 profile="$2"
     local id interfaces interface wpa_cmd
 
     if [ -n "$profile" ] ; then
-        { read -r id interfaces; } < <(wpa_get_network_id $profile) || exit 1
+        { read -r id interfaces; } < <(wpa_get_network_id "$profile") || exit 1
     else
         interfaces=$(netctl_auto_interfaces)
     fi
@@ -111,11 +111,11 @@ wpa_profile_action() {
 
 # Switches to profile $1, preserves list of enabled networks
 switch_to() {
-    local profile=$1
+    local profile="$1"
     local id interface timeout enabled_networks
 
     # Load profile interface, WPA network id and timeout
-    { read -r id interface; } < <(wpa_get_network_id $profile) || exit 1
+    { read -r id interface; } < <(wpa_get_network_id "$profile") || exit 1
     timeout=$(source "$PROFILE_DIR/$profile" ; echo $TimeoutWPA)
     : ${timeout:=25}
 
