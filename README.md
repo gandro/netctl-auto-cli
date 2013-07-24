@@ -1,6 +1,10 @@
 netctl-auto-cli
 ===============
 
+**Please note**: `netctl-auto-cli` has been merged into `netctl`. See the according [pull request](https://github.com/joukewitteveen/netctl/pull/49) for details.
+
+----
+
 Command line interface for the netctl-auto service. It can be used to manage
 wireless profiles when using the netctl-auto service, which is part of netctl.
 
